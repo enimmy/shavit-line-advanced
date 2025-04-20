@@ -58,7 +58,7 @@ public Plugin myinfo =
 	name = "shavit-line-advanced",
 	author = "enimmy",
 	description = "Shows the WR route with a path on the ground. Use the command sm_line to toggle.",
-	version = "0.1",
+	version = "0.2",
 	url = "private"
 };
 
@@ -163,16 +163,9 @@ public void Shavit_OnStyleChanged(int client, int oldstyle, int newstyle, int tr
 	g_iIntCache[client][STYLE_IDX] = newstyle;
 }
 
-public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, int strafes, float sync, int track,
-									float oldtime, float perfs, float avgvel, float maxvel, int timestamp, bool isbestreplay,
-									bool istoolong, bool iscopy, const char[] replaypath, ArrayList frames, int preframes, int postframes, const char[] name)
+public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, int strafes, float sync, int track)
 {
-
-	if((!isbestreplay && g_hReplayFrames[style][track] != INVALID_HANDLE) || istoolong)
-	{
-		return;
-	}
-	LoadReplay(style, track);
+    LoadReplay(style, track);
 }
 
 public void OnConfigsExecuted() {
