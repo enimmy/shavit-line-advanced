@@ -155,8 +155,7 @@ public void LoadReplay(int style, int track) {
 	ArrayList list = Shavit_GetReplayFrames(style, track, true);
 	g_hReplayFrames[style][track] = new ArrayList(sizeof(frame_t));
 
-	if(!list) {
-		LogError("Shavit-Line: Couldn't load replay on Style: %i Track: %i", style, track);
+	if (list == null || list.Length == 0) {
 		return;
 	}
 
