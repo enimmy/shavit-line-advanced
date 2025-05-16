@@ -4,6 +4,8 @@
 #include <clientprefs>
 #include <closestpos>
 #include <sdktools>
+#include <sdkhooks>
+#include <dhooks>
 #include <shavit/core>
 #include <shavit/replay-playback>
 #include <sourcemod>
@@ -81,6 +83,16 @@ enum {
 	Line
 }
 
+enum OSType
+{
+	OSUnknown = 0,
+	OSWindows = 1,
+	OSLinux = 2
+};
+
+OSType gOSType;
+EngineVersion gEngineVer;
+
 int sprite;
 ArrayList g_hReplayFrames[STYLE_LIMIT][TRACKS_SIZE];
 ClosestPos g_hClosestPos[STYLE_LIMIT][TRACKS_SIZE];
@@ -88,11 +100,14 @@ ClosestPos g_hClosestPos[STYLE_LIMIT][TRACKS_SIZE];
 int g_iIntCache[MAXPLAYERS + 1][10];
 Cookie g_hSettings[SETTINGS_NUMBER];
 
+int gTELimitData;
+Address gTELimitAddress;
+
 public Plugin myinfo = {
 	name = "shavit-line-advanced",
 	author = "enimmy",
 	description = "Shows the WR route with a path on the ground. Use the command sm_line to toggle.",
-	version = "0.2",
+	version = "0.3",
 	url = "https://github.com/enimmy/shavit-line-advanced"
 };
 
@@ -104,6 +119,16 @@ public void OnPluginStart() {
 	g_hSettings[FLATMODE] = new Cookie("shavit_line_flatmode", "", CookieAccess_Private);
 
 	RegConsoleCmd("sm_line", LineCmd);
+
+	GameData gconf = new GameData("shavit-line.games");
+	gOSType = view_as<OSType>(GameConfGetOffset(gconf, "OSType"));
+	if(gOSType == OSUnknown){
+		SetFailState("Failed to get OS type. Make sure gamedata file is in gamedata folder, and you are using windows or linux. Your Current OS Type is %d", gOSType);
+	}
+
+	gEngineVer = GetEngineVersion();
+	if(gEngineVer == Engine_CSS)
+		BytePatchTELimit(gconf);
 
 	bool shavitLoaded = LibraryExists("shavit-replay-playback");
 
@@ -124,6 +149,32 @@ public void OnPluginStart() {
 			OnClientCookiesCached(i);
 		}
 	}
+}
+
+public void OnPluginEnd()
+{
+	if(gTELimitAddress == Address_Null)
+		return;
+	
+	StoreToAddress(gTELimitAddress, gTELimitData, NumberType_Int8);
+}
+
+stock void BytePatchTELimit(Handle gconf)
+{
+	//TELimit
+	gTELimitAddress = GameConfGetAddress(gconf, "TELimit");
+	if(gTELimitAddress == Address_Null){
+		SetFailState("Failed to get addres of \"TELimit\".");
+	}
+	
+	gTELimitData = LoadFromAddress(gTELimitAddress, NumberType_Int8);
+	
+	if(gOSType == OSWindows)
+		StoreToAddress(gTELimitAddress, 0xFF, NumberType_Int8);
+	else if(gOSType == OSLinux)
+		StoreToAddress(gTELimitAddress, 0x02, NumberType_Int8);
+	else
+		SetFailState("Failed to store addres of \"TELimit\".");
 }
 
 public void OnClientCookiesCached(int client) {
@@ -155,7 +206,7 @@ public void LoadReplay(int style, int track) {
 	ArrayList list = Shavit_GetReplayFrames(style, track, true);
 	g_hReplayFrames[style][track] = new ArrayList(sizeof(frame_t));
 
-	if (list == null || list.Length == 0) {
+	if(!list) {
 		return;
 	}
 
@@ -203,7 +254,7 @@ Action LineCmd(int client, int args) {
 
 void ShowToggleMenu(int client) {
 	Menu menu = CreateMenu(LinesMenu_Callback);
-	SetMenuTitle(menu, "Line Advanced");
+	SetMenuTitle(menu, "｢ Shavit Line Advanced ｣");
 	AddMenuItem(menu, "linetoggle", (g_iIntCache[client][ENABLED]) ? "[x] Enabled":"[ ] Enabled");
 	AddMenuItem(menu, "flatmode", (g_iIntCache[client][FLATMODE]) ? "[x] Flat Mode":"[ ] Flat Mode");
 

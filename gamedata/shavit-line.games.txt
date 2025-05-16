@@ -1,0 +1,45 @@
+"Games"
+{
+	"#default"
+	{
+		"Offsets"
+		{
+			"OSType"
+			{
+				"windows"		"1"
+				"windows64"		"1"
+				"linux"			"2"
+				"linux64"		"2"
+			}
+		}
+	}
+	"cstrike"
+	{
+		"Addresses"
+		{
+			"TELimit"
+			{
+				"linux"
+                {
+                    "signature" "TELimitPatchLocation"
+					"offset"	"1"
+                }
+				
+				"windows"
+                {
+                    "signature" "TELimitPatchLocation"
+					"offset"	"1"
+                }
+			}
+		}
+		"Signatures"
+		{
+			"TELimitPatchLocation"
+			{
+				"library"		"engine"
+				"windows"		"\xB8\x2A\x2A\x2A\x2A\xBA\x2A\x2A\x2A\x2A\x0F\x45\xD0\x52\x8B\x01\x8D\x55\xBC\x52\x8B\x55\x08\xFF\xB6\x2A\x2A\x2A\x2A\xFF\xB2\x2A\x2A\x2A\x2A\x56\xFF\x90"
+				"linux"			"\x3C\x2A\x8B\x93\x2A\x2A\x2A\x2A\x19\xC0\x59\x25\x2A\x2A\x2A\x2A\x83\xC0\x40\x8B\x0A\x50\x56\xFF\xB3"
+			}
+		}
+	}
+}
