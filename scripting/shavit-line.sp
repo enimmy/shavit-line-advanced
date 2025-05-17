@@ -10,6 +10,9 @@
 #include <shavit/replay-playback>
 #include <sourcemod>
 
+#define NON_GHOST_UPDATE_TICKS 50
+#define GHOST_UPDATE_TICKS     10
+
 #define COLORS_NUMBER 9
 
 enum { //enum for colors same indexes as colors below
@@ -50,20 +53,22 @@ int g_iColorInts[][] = { //general colors
 
 #define SKIPFRAMES 5
 #define SEC_AHEAD 7
-#define SEC_UPDATE_DELAY 1.5
+#define SEC_UPDATE_DELAY 1.5 // If you have gammacase's showplayerclips installed you should divide this by 2 so 0.75
 
 #define DUCKCOLOR 0
 #define NODUCKCOLOR 1
 #define LINECOLOR 2
 #define ENABLED 3
 #define FLATMODE 4
-#define TRACK_IDX 5
-#define STYLE_IDX 6
-#define CMD_NUM 7
-#define EDIT_ELEMENT 8
-#define EDIT_COLOR 9
+#define GHOSTMODE 5
+#define LINE_WIDTH 6
+#define TRACK_IDX 7
+#define STYLE_IDX 8
+#define CMD_NUM 9
+#define EDIT_ELEMENT 10
+#define EDIT_COLOR 11
 
-#define SETTINGS_NUMBER 5
+#define SETTINGS_NUMBER 7
 
 #define TE_TIME 1.0
 #define TE_MIN 0.5
@@ -87,36 +92,53 @@ enum OSType
 {
 	OSUnknown = 0,
 	OSWindows = 1,
-	OSLinux = 2
+	OSLinux   = 2
 };
+
+enum {
+	GS_RACE  = 0,
+	GS_ROUTE = 1,
+	GS_GUIDE = 2
+}
 
 OSType gOSType;
 EngineVersion gEngineVer;
 
 int sprite;
 ArrayList g_hReplayFrames[STYLE_LIMIT][TRACKS_SIZE];
+ArrayList g_hReplayFrames_Guide[STYLE_LIMIT][TRACKS_SIZE];
+int g_iReplayPreFrames[STYLE_LIMIT][TRACKS_SIZE];
 ClosestPos g_hClosestPos[STYLE_LIMIT][TRACKS_SIZE];
+ClosestPos g_hClosestPos_Guide[STYLE_LIMIT][TRACKS_SIZE];
 
-int g_iIntCache[MAXPLAYERS + 1][10];
+int g_iIntCache[MAXPLAYERS + 1][12];
+float g_fLineWidth[MAXPLAYERS + 1];
 Cookie g_hSettings[SETTINGS_NUMBER];
 
 int gTELimitData;
 Address gTELimitAddress;
 
+int gI_GuideFramesAhead;
+int gI_Tickrate;
+
 public Plugin myinfo = {
 	name = "shavit-line-advanced",
 	author = "enimmy",
 	description = "Shows the WR route with a path on the ground. Use the command sm_line to toggle.",
-	version = "0.3",
+	version = "0.4",
 	url = "https://github.com/enimmy/shavit-line-advanced"
 };
 
 public void OnPluginStart() {
+	gI_Tickrate = RoundToNearest(1.0 / GetTickInterval());
+
 	g_hSettings[DUCKCOLOR] = new Cookie("shavit_line_duckcolor", "", CookieAccess_Private);
 	g_hSettings[NODUCKCOLOR] = new Cookie("shavit_line_noduckcolor", "", CookieAccess_Private);
 	g_hSettings[LINECOLOR] = new Cookie("shavit_line_linecolor", "", CookieAccess_Private);
 	g_hSettings[ENABLED] = new Cookie("shavit_line_enabled", "", CookieAccess_Private);
 	g_hSettings[FLATMODE] = new Cookie("shavit_line_flatmode", "", CookieAccess_Private);
+	g_hSettings[GHOSTMODE] = new Cookie("shavit_line_ghostmode", "", CookieAccess_Private);
+	g_hSettings[LINE_WIDTH] = new Cookie("shavit_line_width", "1", CookieAccess_Private);
 
 	RegConsoleCmd("sm_line", LineCmd);
 
@@ -178,18 +200,37 @@ stock void BytePatchTELimit(Handle gconf)
 }
 
 public void OnClientCookiesCached(int client) {
-	char strCookie[256];
+    char strCookie[256];
+    bool defaultsPushed = false;
 
-	for(int i = 0; i < SETTINGS_NUMBER; i++) {
-		GetClientCookie(client, g_hSettings[i], strCookie, sizeof(strCookie));
-		if(strCookie[0] == '\0') {
-			PushDefaultSettings(client);
-			break;
-		}
-		g_iIntCache[client][i] = StringToInt(strCookie);
-	}
+    for(int i = 0; i < SETTINGS_NUMBER; i++) {
+        GetClientCookie(client, g_hSettings[i], strCookie, sizeof(strCookie));
+        if(strCookie[0] == '\0') {
+            if (!defaultsPushed) {
+                PushDefaultSettings(client);
+                defaultsPushed = true;
+            }
+            break;
+        }
 
-	UpdateTrackStyle(client);
+        if (i == LINE_WIDTH) {
+             g_fLineWidth[client] = StringToFloat(strCookie);
+        } else {
+             g_iIntCache[client][i] = StringToInt(strCookie);
+        }
+    }
+
+    if (!defaultsPushed) {
+         GetClientCookie(client, g_hSettings[LINE_WIDTH], strCookie, sizeof(strCookie));
+         if (strCookie[0] != '\0') {
+              g_fLineWidth[client] = StringToFloat(strCookie);
+         } else {
+              g_fLineWidth[client] = 1.0;
+         }
+    }
+
+
+    UpdateTrackStyle(client);
 }
 
 public void Shavit_OnReplaysLoaded() {
@@ -202,9 +243,15 @@ public void Shavit_OnReplaysLoaded() {
 
 public void LoadReplay(int style, int track) {
 	delete g_hClosestPos[style][track];
+	delete g_hClosestPos_Guide[style][track];
 	delete g_hReplayFrames[style][track];
+	delete g_hReplayFrames_Guide[style][track];
+	g_iReplayPreFrames[style][track] = 0;
+
 	ArrayList list = Shavit_GetReplayFrames(style, track, true);
 	g_hReplayFrames[style][track] = new ArrayList(sizeof(frame_t));
+	g_hReplayFrames_Guide[style][track] = new ArrayList(sizeof(frame_t));
+	g_iReplayPreFrames[style][track] = Shavit_GetReplayPreFrames(style, track);
 
 	if(!list) {
 		return;
@@ -222,12 +269,15 @@ public void LoadReplay(int style, int track) {
 			hitGround = false;
 		}
 
+		g_hReplayFrames_Guide[style][track].PushArray(aFrame);
+
 		if (hitGround || i % SKIPFRAMES == 0) {
 			g_hReplayFrames[style][track].PushArray(aFrame);
 		}
 	}
 
 	g_hClosestPos[style][track] = new ClosestPos(g_hReplayFrames[style][track], 0, 0, Shavit_GetReplayFrameCount(style, track));
+	g_hClosestPos_Guide[style][track] = new ClosestPos(g_hReplayFrames_Guide[style][track], 0, 0, Shavit_GetReplayFrames(style, track).Length - Shavit_GetReplayPostFrames(style, track));
 	delete list;
 }
 
@@ -242,6 +292,8 @@ public void Shavit_OnReplaySaved(int client, int style, float time, int jumps, i
 
 public void OnConfigsExecuted() {
 	sprite = PrecacheModel("sprites/laserbeam.vmt");
+
+	gI_GuideFramesAhead = RoundToNearest(gI_Tickrate * SEC_UPDATE_DELAY);
 }
 
 Action LineCmd(int client, int args) {
@@ -257,12 +309,15 @@ void ShowToggleMenu(int client) {
 	SetMenuTitle(menu, "｢ Shavit Line Advanced ｣");
 	AddMenuItem(menu, "linetoggle", (g_iIntCache[client][ENABLED]) ? "[x] Enabled":"[ ] Enabled");
 	AddMenuItem(menu, "flatmode", (g_iIntCache[client][FLATMODE]) ? "[x] Flat Mode":"[ ] Flat Mode");
+	AddMenuItem(menu, "ghosttoggle", (g_iIntCache[client][GHOSTMODE]) ? "[x] Guide Mode":"[ ] Guide Mode");
 
 	char sMessage[256];
 	Shavit_GetStyleStrings(g_iIntCache[client][STYLE_IDX], sStyleName, sMessage, sizeof(sMessage));
 	Format(sMessage, sizeof(sMessage), "Style: %s", sMessage);
+
 	AddMenuItem(menu, "style", sMessage);
 	AddMenuItem(menu, "colors", "Colors");
+	AddMenuItem(menu, "widths", "Line Width");
 	DisplayMenu(menu, client, MENU_TIME_FOREVER);
 }
 
@@ -285,8 +340,11 @@ public int LinesMenu_Callback (Menu menu, MenuAction action, int client, int opt
 			PushCookies(client);
 		}
 		else if(StrEqual(info, "flatmode")) {
-			g_iIntCache[client][FLATMODE] = !g_iIntCache[client][FLATMODE];
-
+			if(g_iIntCache[client][GHOSTMODE]){
+				Shavit_PrintToChat(client, "FlatMode disabled by GuideMode, please turn off GuideMode first!");
+			}else{
+				g_iIntCache[client][FLATMODE] = !g_iIntCache[client][FLATMODE];
+			}
 			PushCookies(client);
 		}
 		else if(StrEqual(info, "style")) {
@@ -304,6 +362,20 @@ public int LinesMenu_Callback (Menu menu, MenuAction action, int client, int opt
 		else if (StrEqual(info, "colors")) {
 			ShowColorOptionsMenu(client);
 			return 0;
+		}else if (StrEqual(info, "widths")) {
+			ShowWidthOptionsMenu(client);
+			return 0;
+		}else if (StrEqual(info, "ghosttoggle")) {
+			g_iIntCache[client][GHOSTMODE] = !g_iIntCache[client][GHOSTMODE];
+			
+			if(g_iIntCache[client][GHOSTMODE]){
+				Shavit_PrintToChat(client, "Guide mode can display the best recorded route in server.");
+				if(g_iIntCache[client][FLATMODE]){
+					Shavit_PrintToChat(client, "FlatMode automatic disabled by GuideMode");
+					g_iIntCache[client][FLATMODE] = 0;
+				}
+			}
+			PushCookies(client);
 		}
 		ShowToggleMenu(client);
 	}
@@ -324,6 +396,55 @@ void ShowColorOptionsMenu(int client) {
 	Format(sMessage, sizeof(sMessage), "Color: %s", g_sColorStrs[g_iIntCache[client][g_iIntCache[client][EDIT_ELEMENT]]]);
 	AddMenuItem(menu, "editcolor", sMessage);
 	DisplayMenu(menu, client, MENU_TIME_FOREVER);
+}
+
+void ShowWidthOptionsMenu(int client) {
+    Menu menu = CreateMenu(LinesWidth_Callback);
+    SetMenuTitle(menu, "Widths\n\n");
+    char sMessage[256];
+
+    Format(sMessage, sizeof(sMessage), " + 0.1");
+    AddMenuItem(menu, "add", sMessage);
+
+    Format(sMessage, sizeof(sMessage), "< Width: %.1f >", g_fLineWidth[client] > 0.0 ? g_fLineWidth[client] : 1.0);
+    AddMenuItem(menu, "show_width", sMessage, 1);
+    Format(sMessage, sizeof(sMessage), " - 0.1");
+    AddMenuItem(menu, "del", sMessage);
+
+    DisplayMenu(menu, client, MENU_TIME_FOREVER);
+}
+
+public int LinesWidth_Callback(Menu menu, MenuAction action, int client, int option) {
+    if (action == MenuAction_Select) {
+        char info[32];
+        GetMenuItem(menu, option, info, sizeof(info));
+
+        float currentWidth = g_fLineWidth[client];
+
+        if(currentWidth <= 0.0){
+            currentWidth = 1.0;
+        }
+        if(StrEqual(info, "add")){
+            if(10.0 > currentWidth){
+                currentWidth += 0.1;
+            }
+        }else
+        if(StrEqual(info, "del")){
+            if(currentWidth > 0.1){
+                currentWidth -= 0.1;
+            } else {
+                // Optional: Snap to a minimum positive value or 0 if needed
+                // currentWidth = 0.1;
+            }
+        }
+        g_fLineWidth[client] = currentWidth;
+        PushCookies(client);
+        ShowWidthOptionsMenu(client);
+
+    } else if (action == MenuAction_End) {
+        delete menu;
+    }
+    return 0;
 }
 
 public int LinesColors_Callback(Menu menu, MenuAction action, int client, int option) {
@@ -359,74 +480,119 @@ public int LinesColors_Callback(Menu menu, MenuAction action, int client, int op
 }
 
 void PushDefaultSettings(int client) {
-	g_iIntCache[client][ENABLED] = 1;
-	g_iIntCache[client][FLATMODE] = 0;
-	g_iIntCache[client][DUCKCOLOR] = Red;
-	g_iIntCache[client][NODUCKCOLOR] = Pink;
-	g_iIntCache[client][LINECOLOR] = White;
-	PushCookies(client);
-	UpdateTrackStyle(client);
+    g_iIntCache[client][ENABLED] = 1;
+    g_iIntCache[client][FLATMODE] = 0;
+    g_iIntCache[client][DUCKCOLOR] = Red;
+    g_iIntCache[client][NODUCKCOLOR] = Pink;
+    g_iIntCache[client][LINECOLOR] = White;
+    g_iIntCache[client][GHOSTMODE] = 0;
+    g_iIntCache[client][TRACK_IDX] = 0;
+    g_iIntCache[client][STYLE_IDX] = 0;
+    g_iIntCache[client][CMD_NUM] = 0;
+    g_iIntCache[client][EDIT_ELEMENT] = 0;
+    g_iIntCache[client][EDIT_COLOR] = 0;
+
+    g_fLineWidth[client] = 1.0;
+
+    PushCookies(client);
+    UpdateTrackStyle(client);
 }
 
 void PushCookies(int client) {
-	for(int i = 0; i < SETTINGS_NUMBER; i++) {
-		SetCookie(client, g_hSettings[i], g_iIntCache[client][i]);
-	}
+    char strCookie[64];
+
+    for(int i = 0; i < SETTINGS_NUMBER; i++) {
+        if (i == LINE_WIDTH) {
+            FloatToString(g_fLineWidth[client], strCookie, sizeof(strCookie));
+            SetClientCookie(client, g_hSettings[i], strCookie);
+        } else {
+            IntToString(g_iIntCache[client][i], strCookie, sizeof(strCookie));
+            SetClientCookie(client, g_hSettings[i], strCookie);
+        }
+    }
 }
 
-void SetCookie(int client, Cookie hCookie, int n) {
-	char strCookie[64];
-	IntToString(n, strCookie, sizeof(strCookie));
-	SetClientCookie(client, hCookie, strCookie);
-}
-
-public Action OnPlayerRunCmd(int client) {
+public void OnPlayerRunCmdPost(int client) {
 	if (!IsValidClient(client) || !g_iIntCache[client][ENABLED]) {
-		return Plugin_Continue;
+		return;
 	}
 
-	if ((++g_iIntCache[client][CMD_NUM] % 60) != 0) {
-		return Plugin_Continue;
+	g_iIntCache[client][CMD_NUM]++;
+
+	int updateInterval = g_iIntCache[client][GHOSTMODE] ? GHOST_UPDATE_TICKS : NON_GHOST_UPDATE_TICKS;
+
+	if (g_iIntCache[client][CMD_NUM] % updateInterval != 0) {
+		return;
 	}
 
-	g_iIntCache[client][CMD_NUM] = 0;
-	ArrayList list = g_hReplayFrames[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]];
-	if (list.Length == 0) {
-		return Plugin_Continue;
+	g_iIntCache[client][CMD_NUM] %= updateInterval;
+
+	ArrayList list;
+	ClosestPos cp_handle;
+	int framesToDraw;
+
+	if(!g_iIntCache[client][GHOSTMODE]){
+		list = g_hReplayFrames[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]];
+		cp_handle = g_hClosestPos[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]];
+		framesToDraw = 125;
+	} else {
+		list = g_hReplayFrames_Guide[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]];
+		cp_handle = g_hClosestPos_Guide[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]];
+        framesToDraw = gI_GuideFramesAhead;
+	}
+
+	if(!cp_handle || list.Length == 0){
+		return;
 	}
 
 	float pos[3];
 	GetClientAbsOrigin(client, pos);
-	int closeframe = max(0, (g_hClosestPos[g_iIntCache[client][STYLE_IDX]][g_iIntCache[client][TRACK_IDX]].Find(pos)) - 30);
-	int endframe = min(list.Length, closeframe + 125);
+	int closeframe = cp_handle.Find(pos);
 
-	int flags;
-	frame_t aFrame;
-	list.GetArray(closeframe, aFrame, sizeof(frame_t));
-	pos = aFrame.pos;
-	bool firstFlatDraw = true;
-	for(int i = closeframe; i < endframe; i++) {
-		list.GetArray(i, aFrame, 8);
-		aFrame.pos[2] += 2.5;
-		if(aFrame.flags & FL_ONGROUND && !(flags & FL_ONGROUND)) {
-			DrawBox(client, aFrame.pos, g_iColorInts[g_iIntCache[client][(flags & FL_DUCKING) ? DUCKCOLOR:NODUCKCOLOR]]);
-
-			if(!firstFlatDraw) {
-				DrawBeam(client, pos, aFrame.pos, TE_TIME, TE_MIN, TE_MAX, g_iColorInts[g_iIntCache[client][LINECOLOR]], 0.0, 0);
-			}
-
-			firstFlatDraw = false;
-			pos = aFrame.pos;
-		}
-
-		if(!g_iIntCache[client][FLATMODE]) {
-			DrawBeam(client, pos, aFrame.pos, TE_TIME, TE_MIN, TE_MAX, g_iColorInts[g_iIntCache[client][LINECOLOR]], 0.0, 0);
-			pos = aFrame.pos;
-		}
-
-		flags = aFrame.flags;
+	if(closeframe < 0){
+		 return;
 	}
-	return Plugin_Continue;
+
+	int startFrame = closeframe;
+	int endFrame = min(list.Length - 1, startFrame + framesToDraw);
+
+	if(startFrame < 0 || startFrame >= list.Length || endFrame < startFrame) {
+		 return;
+	}
+
+	frame_t currentFrameData;
+	list.GetArray(startFrame, currentFrameData, sizeof(frame_t));
+	float currentPos[3];
+	currentPos = currentFrameData.pos;
+
+	if(!g_iIntCache[client][GHOSTMODE] && !g_iIntCache[client][FLATMODE]) {
+		currentPos[2] += 2.5;
+	}
+
+	int prevFlags = currentFrameData.flags;
+
+	for(int i = startFrame + 1; i <= endFrame; i++) {
+		frame_t nextFrameData;
+		list.GetArray(i, nextFrameData, sizeof(frame_t));
+		float nextPos[3];
+		nextPos = nextFrameData.pos;
+
+		if(!g_iIntCache[client][GHOSTMODE] && !g_iIntCache[client][FLATMODE]) {
+			nextPos[2] += 2.5;
+		}
+
+		DrawBeam(client, currentPos, nextPos, TE_TIME, g_fLineWidth[client], g_fLineWidth[client], g_iColorInts[g_iIntCache[client][LINECOLOR]], 0.0, 0);
+
+		if(!g_iIntCache[client][GHOSTMODE]) {
+			if((nextFrameData.flags & FL_ONGROUND) && !(prevFlags & FL_ONGROUND)) {
+				DrawBox(client, currentPos, g_iColorInts[g_iIntCache[client][(prevFlags & FL_DUCKING) ? DUCKCOLOR:NODUCKCOLOR]]);
+			}
+		}
+
+		currentPos = nextPos;
+		prevFlags = nextFrameData.flags;
+	}
+
 }
 
 float box_offset[4][2] = {
@@ -464,10 +630,6 @@ void DrawBeam(int client, float startvec[3], float endvec[3], float life, float 
 
 int min(int a, int b) {
 	return a < b ? a : b;
-}
-
-int max(int a, int b) {
-	return a > b ? a : b;
 }
 
 void UpdateTrackStyle(int client) {
